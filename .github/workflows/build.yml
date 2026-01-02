@@ -1,0 +1,108 @@
+name: x86_64 and i686 release builds
+
+permissions:
+  contents: write
+
+on:
+  push:
+    tags:
+      - "v*"
+
+  workflow_dispatch:
+    inputs:
+      lua_version:
+        description: 'Lua Version (x.x.x)'
+        required: true
+        default: '5.4.8'
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    strategy:
+      matrix:
+        include:
+          - sys: MINGW64
+            env: x86_64
+            suffix: win64
+          - sys: MINGW32
+            env: i686
+            suffix: win32
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{matrix.sys}}
+          update: true
+          install: >-
+            git
+            curl
+            zip
+            tar
+            gzip
+            base-devel
+            mingw-w64-${{matrix.env}}-toolchain
+
+      - name: Parse Version
+        id: get_ver
+        run: |
+          if [[ "${{github.event_name}}" == "workflow_dispatch" ]]; then
+            VER="${{inputs.lua_version}}"
+          else
+            VER="${GITHUB_REF#refs/tags/v}"
+          fi
+          echo "LUA_VER=$VER" >> "$GITHUB_ENV"
+          echo "VERSION=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Download Lua Source
+        run: |
+            curl -L -R -O https://www.lua.org/ftp/lua-$LUA_VER.tar.gz
+            tar zxf lua-$LUA_VER.tar.gz
+
+      - name: Compile
+        run: |
+          cd lua-$LUA_VER/src
+          ls *.c | grep -vE 'lua.c|luac.c' | xargs gcc -O2 -std=gnu99 -static -c
+          gcc -O2 -std=gnu99 -static -o lua.exe lua.c *.o
+          gcc -O2 -std=gnu99 -static -o luac.exe luac.c *.o
+          strip lua.exe
+          strip luac.exe
+
+      - name: Package
+        run: |
+          DIR="lua-$LUA_VER"
+          mkdir -p "$DIR/bin"
+          mv "$DIR/src/lua.exe" "$DIR/bin"
+          mv "$DIR/src/luac.exe" "$DIR/bin"
+          rm -f "$DIR/src/"*.o
+          zip -r "$DIR-${{matrix.suffix}}.zip" "$DIR"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lua-${{steps.get_ver.outputs.VERSION}}-${{matrix.suffix}}
+          path: "*.zip"
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/')
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download Artifact
+        uses: actions/download-artifact@v4
+        with:
+          pattern: lua-*
+          merge-multiple: true
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: "*.zip"
